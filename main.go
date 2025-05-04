@@ -1,8 +1,10 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
@@ -39,12 +41,25 @@ type Release struct {
 	FeedItem   *gofeed.Item
 }
 
+type RepositoryReleases struct {
+	Repository *Repository
+	FeedItems  []*gofeed.Item
+}
+
+//go:embed mail.html
+var mailTemplate embed.FS
+
 ///////////////////////////////////////////////////////////////////////////////
 
 func main() {
 	s, err := readSettings()
 	if err != nil {
 		log.Fatalf("unable to read settings.json: %v", err)
+	}
+
+	tpl, err := loadMailTemplate()
+	if err != nil {
+		log.Fatalf("unable to load mail template: %v", err)
 	}
 
 	repositories, err := getStarredRepos(s.UserName, s.Token)
@@ -84,8 +99,19 @@ func main() {
 	pages := splitReleasesByPages(releases)
 	log.Printf("got pages to send: %d", len(pages))
 
-	//TODO render
-	//TODO send
+	for _, page := range pages {
+		pageRepos := extractPageRepositories(page)
+		sb := strings.Builder{}
+		err := tpl.ExecuteTemplate(&sb, "mail.html", map[string]any{
+			"repositories": pageRepos,
+		})
+		if err != nil {
+			log.Printf("unable to render page: %v", err)
+			continue
+		}
+
+		//TODO send
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -234,5 +260,52 @@ func splitReleasesByPages(releases []Release) [][]Release {
 		currentPageLength += len(release.FeedItem.Content)
 	}
 
+	if len(currentPage) > 0 {
+		pages = append(pages, currentPage)
+	}
+
 	return pages
+}
+
+func extractPageRepositories(releases []Release) []RepositoryReleases {
+	rm := make(map[string]*RepositoryReleases)
+
+	for _, release := range releases {
+		rr, ok := rm[release.Repository.FullName]
+		if !ok {
+			rr = &RepositoryReleases{
+				Repository: release.Repository,
+			}
+			rm[release.Repository.FullName] = rr
+		}
+		rr.FeedItems = append(rr.FeedItems, release.FeedItem)
+	}
+
+	var rr []RepositoryReleases
+	for _, r := range rm {
+		rr = append(rr, *r)
+	}
+
+	slices.SortFunc(rr, func(a, b RepositoryReleases) int {
+		return strings.Compare(a.Repository.FullName, b.Repository.FullName)
+	})
+
+	return rr
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+func loadMailTemplate() (*template.Template, error) {
+	tpl := template.New("mail").Funcs(template.FuncMap{
+		"unescape": func(s string) template.HTML {
+			return template.HTML(s)
+		},
+	})
+
+	tpl, err := tpl.ParseFS(mailTemplate, "*.html")
+	if err != nil {
+		return nil, err
+	}
+
+	return tpl, nil
 }
