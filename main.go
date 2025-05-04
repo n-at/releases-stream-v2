@@ -14,13 +14,21 @@ import (
 	"time"
 
 	"github.com/mmcdole/gofeed"
+	"gopkg.in/gomail.v2"
 )
 
 const PAGE_MAX_LENGTH = 512 * 1024
 
 type Settings struct {
-	UserName string `json:"username"`
-	Token    string `json:"token"`
+	UserName     string `json:"username"`
+	Token        string `json:"token"`
+	MailFrom     string `json:"mail_from"`
+	MailTo       string `json:"mail_to"`
+	MailHost     string `json:"mail_host"`
+	MailPort     int    `json:"mail_port"`
+	MailSSL      bool   `json:"mail_ssl"`
+	MailUsername string `json:"mail_username"`
+	MailPassword string `json:"mail_password"`
 }
 
 type Repository struct {
@@ -110,7 +118,9 @@ func main() {
 			continue
 		}
 
-		//TODO send
+		if err := sendMail(s, sb.String()); err != nil {
+			log.Printf("unable to send mail: %v", err)
+		}
 	}
 }
 
@@ -308,4 +318,19 @@ func loadMailTemplate() (*template.Template, error) {
 	}
 
 	return tpl, nil
+}
+
+func sendMail(s Settings, text string) error {
+	msg := gomail.NewMessage()
+	msg.SetHeader("From", s.MailFrom)
+	msg.SetHeader("To", s.MailTo)
+	msg.SetHeader("Subject", "New GitHub Releases")
+	msg.SetBody("text/html", text)
+
+	d := gomail.NewDialer(s.MailHost, s.MailPort, s.MailUsername, s.MailPassword)
+	if s.MailSSL {
+		d.SSL = true
+	}
+
+	return d.DialAndSend(msg)
 }

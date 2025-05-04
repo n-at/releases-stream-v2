@@ -1,4 +1,12 @@
 {
     "username": "n-at",
-    "token": "ghp_abacaba"
+    "token": "ghp_abacaba",
+
+    "mail_from": "from@example.com",
+    "mail_to": "to@example.com",
+    "mail_host": "mail.example.com",
+    "mail_port": 465,
+    "mail_ssl": true,
+    "mail_username": "******",
+    "mail_password": "******"
 }
