@@ -39,9 +39,6 @@ type Repository struct {
 	ForksCount      int    `json:"forks_count"`
 	StargazersCount int    `json:"stargazers_count"`
 	WatchersCount   int    `json:"watchers_count"`
-	Owner           struct {
-		Login string `json:"login"`
-	} `json:"owner"`
 }
 
 type Release struct {
@@ -60,7 +57,7 @@ var mailTemplate embed.FS
 ///////////////////////////////////////////////////////////////////////////////
 
 func main() {
-	s, err := readSettings()
+	settings, err := readSettings()
 	if err != nil {
 		log.Fatalf("unable to read settings.json: %v", err)
 	}
@@ -70,7 +67,7 @@ func main() {
 		log.Fatalf("unable to load mail template: %v", err)
 	}
 
-	repositories, err := getStarredRepos(s.UserName, s.Token)
+	repos, err := getStarredRepos(settings.UserName, settings.Token)
 	if err != nil {
 		log.Fatalf("unable to get starred repos: %v", err)
 	}
@@ -79,24 +76,24 @@ func main() {
 
 	var releases []Release
 
-	for _, repository := range repositories {
-		log.Printf("reading releases for %s...", repository.FullName)
+	for _, repo := range repos {
+		log.Printf("reading releases for %s...", repo.FullName)
 
-		releasesFeed, err := getLatestReleases(repository, latestIds[repository.FullName])
+		releasesFeed, err := getLatestReleases(repo, latestIds[repo.FullName])
 		if err != nil {
-			log.Printf("unable to read releases for %s: %v", repository.FullName, err)
+			log.Printf("unable to read releases for %s: %v", repo.FullName, err)
 			continue
 		}
 
-		log.Printf("read releases for %s: %d", repository.FullName, len(releasesFeed))
+		log.Printf("read releases for %s: %d", repo.FullName, len(releasesFeed))
 
 		if len(releasesFeed) > 0 {
-			latestIds[repository.FullName] = releasesFeed[0].GUID
+			latestIds[repo.FullName] = releasesFeed[0].GUID
 		}
 
 		for _, releaseFeedItem := range releasesFeed {
 			releases = append(releases, Release{
-				Repository: &repository,
+				Repository: &repo,
 				FeedItem:   releaseFeedItem,
 			})
 		}
@@ -118,7 +115,7 @@ func main() {
 			continue
 		}
 
-		if err := sendMail(s, sb.String()); err != nil {
+		if err := sendMail(settings, sb.String()); err != nil {
 			log.Printf("unable to send mail: %v", err)
 		}
 	}
@@ -173,7 +170,7 @@ func writeLatestIds(ids map[string]string) {
 ///////////////////////////////////////////////////////////////////////////////
 
 func getStarredRepos(username, token string) ([]Repository, error) {
-	var r []Repository
+	var repos []Repository
 
 	page := 1
 
@@ -181,38 +178,38 @@ func getStarredRepos(username, token string) ([]Repository, error) {
 		url := fmt.Sprintf("https://api.github.com/users/%s/starred?per_page=100&page=%d", username, page)
 		log.Printf("reading stars page %d...", page)
 
-		resp, err := sendRequest(url, token)
+		res, err := sendRequest(url, token)
 		if err != nil {
 			return nil, fmt.Errorf("unable to send request: %v", err)
 		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("bad response status: %v", resp.Status)
+		if res.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("bad response status: %v", res.Status)
 		}
 
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("unable to read response: %v", err)
 		}
 
-		var repos []Repository
-		if err := json.Unmarshal(body, &repos); err != nil {
+		var pageRepos []Repository
+		if err := json.Unmarshal(body, &pageRepos); err != nil {
 			return nil, fmt.Errorf("unable to parse JSON: %v", err)
 		}
-		if len(repos) == 0 {
+		if len(pageRepos) == 0 {
 			break
 		}
 
-		r = append(r, repos...)
+		repos = append(repos, pageRepos...)
 
 		page++
 	}
 
-	slices.SortFunc(r, func(a, b Repository) int {
+	slices.SortFunc(repos, func(a, b Repository) int {
 		return strings.Compare(a.FullName, b.FullName)
 	})
 
-	return r, nil
+	return repos, nil
 }
 
 func sendRequest(url, token string) (*http.Response, error) {
@@ -233,9 +230,9 @@ func sendRequest(url, token string) (*http.Response, error) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-func getLatestReleases(r Repository, latestId string) ([]*gofeed.Item, error) {
+func getLatestReleases(repo Repository, latestId string) ([]*gofeed.Item, error) {
 	fp := gofeed.NewParser()
-	feed, err := fp.ParseURL(fmt.Sprintf("%s/releases.atom", r.Url))
+	feed, err := fp.ParseURL(fmt.Sprintf("%s/releases.atom", repo.Url))
 	if err != nil {
 		return nil, err
 	}
@@ -278,22 +275,22 @@ func splitReleasesByPages(releases []Release) [][]Release {
 }
 
 func extractPageRepositories(releases []Release) []RepositoryReleases {
-	rm := make(map[string]*RepositoryReleases)
+	repos := make(map[string]*RepositoryReleases)
 
 	for _, release := range releases {
-		rr, ok := rm[release.Repository.FullName]
+		repo, ok := repos[release.Repository.FullName]
 		if !ok {
-			rr = &RepositoryReleases{
+			repo = &RepositoryReleases{
 				Repository: release.Repository,
 			}
-			rm[release.Repository.FullName] = rr
+			repos[release.Repository.FullName] = repo
 		}
-		rr.FeedItems = append(rr.FeedItems, release.FeedItem)
+		repo.FeedItems = append(repo.FeedItems, release.FeedItem)
 	}
 
 	var rr []RepositoryReleases
-	for _, r := range rm {
-		rr = append(rr, *r)
+	for _, repo := range repos {
+		rr = append(rr, *repo)
 	}
 
 	slices.SortFunc(rr, func(a, b RepositoryReleases) int {
