@@ -10,7 +10,11 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/mmcdole/gofeed"
 )
+
+const PAGE_MAX_LENGTH = 512 * 1024
 
 type Settings struct {
 	UserName string `json:"username"`
@@ -30,6 +34,11 @@ type Repository struct {
 	} `json:"owner"`
 }
 
+type Release struct {
+	Repository *Repository
+	FeedItem   *gofeed.Item
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 func main() {
@@ -38,14 +47,45 @@ func main() {
 		log.Fatalf("unable to read settings.json: %v", err)
 	}
 
-	r, err := getStarredRepos(s.UserName, s.Token)
+	repositories, err := getStarredRepos(s.UserName, s.Token)
 	if err != nil {
 		log.Fatalf("unable to get starred repos: %v", err)
 	}
 
-	for _, item := range r {
-		fmt.Printf("%s: %s\n", item.FullName, item.Url)
+	latestIds := readLatestIds()
+
+	var releases []Release
+
+	for _, repository := range repositories {
+		log.Printf("reading releases for %s...", repository.FullName)
+
+		releasesFeed, err := getLatestReleases(repository, latestIds[repository.FullName])
+		if err != nil {
+			log.Printf("unable to read releases for %s: %v", repository.FullName, err)
+			continue
+		}
+
+		log.Printf("read releases for %s: %d", repository.FullName, len(releasesFeed))
+
+		if len(releasesFeed) > 0 {
+			latestIds[repository.FullName] = releasesFeed[0].GUID
+		}
+
+		for _, releaseFeedItem := range releasesFeed {
+			releases = append(releases, Release{
+				Repository: &repository,
+				FeedItem:   releaseFeedItem,
+			})
+		}
 	}
+
+	defer writeLatestIds(latestIds)
+
+	pages := splitReleasesByPages(releases)
+	log.Printf("got pages to send: %d", len(pages))
+
+	//TODO render
+	//TODO send
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -65,6 +105,37 @@ func readSettings() (Settings, error) {
 	return s, nil
 }
 
+func readLatestIds() map[string]string {
+	ids := make(map[string]string)
+
+	bytes, err := os.ReadFile("latest.json")
+	if err != nil {
+		log.Printf("unable to read latest.json: %v", err)
+		return ids
+	}
+
+	if err := json.Unmarshal(bytes, &ids); err != nil {
+		log.Printf("unable to read latest.json: %v", err)
+		return ids
+	}
+
+	return ids
+}
+
+func writeLatestIds(ids map[string]string) {
+	bytes, err := json.Marshal(ids)
+	if err != nil {
+		log.Printf("unable to marshal latest.json: %d", err)
+		return
+	}
+
+	if err := os.WriteFile("latest.json", bytes, 0666); err != nil {
+		log.Printf("unable to write latest.json: %v", err)
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 func getStarredRepos(username, token string) ([]Repository, error) {
 	var r []Repository
 
@@ -72,6 +143,7 @@ func getStarredRepos(username, token string) ([]Repository, error) {
 
 	for {
 		url := fmt.Sprintf("https://api.github.com/users/%s/starred?per_page=100&page=%d", username, page)
+		log.Printf("reading stars page %d...", page)
 
 		resp, err := sendRequest(url, token)
 		if err != nil {
@@ -121,4 +193,46 @@ func sendRequest(url, token string) (*http.Response, error) {
 	req.Header.Set("User-Agent", "Go-GitHub-Starred-Script")
 
 	return client.Do(req)
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+func getLatestReleases(r Repository, latestId string) ([]*gofeed.Item, error) {
+	fp := gofeed.NewParser()
+	feed, err := fp.ParseURL(fmt.Sprintf("%s/releases.atom", r.Url))
+	if err != nil {
+		return nil, err
+	}
+
+	var filtered []*gofeed.Item
+
+	for _, item := range feed.Items {
+		if item.GUID == latestId {
+			break
+		}
+		filtered = append(filtered, item)
+	}
+
+	return filtered, nil
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+func splitReleasesByPages(releases []Release) [][]Release {
+	var pages [][]Release
+
+	var currentPage []Release
+	currentPageLength := 0
+
+	for _, release := range releases {
+		if len(currentPage) > 0 && currentPageLength+len(release.FeedItem.Content) > PAGE_MAX_LENGTH {
+			pages = append(pages, currentPage)
+			currentPage = []Release{}
+			currentPageLength = 0
+		}
+		currentPage = append(currentPage, release)
+		currentPageLength += len(release.FeedItem.Content)
+	}
+
+	return pages
 }
