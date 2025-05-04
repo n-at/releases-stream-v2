@@ -17,7 +17,7 @@ import (
 	"gopkg.in/gomail.v2"
 )
 
-const PAGE_MAX_LENGTH = 512 * 1024
+const PAGE_MAX_LENGTH = 2 * 1024 * 1024
 
 type Settings struct {
 	UserName     string `json:"username"`
